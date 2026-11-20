@@ -1,0 +1,772 @@
+openapi: 3.1.0
+info:
+  title: API de Notas Fiscais (teste de frontend)
+  version: 1.0.0
+  description: |
+    API fictícia de notas fiscais eletrônicas usada no teste técnico de frontend. Todos os dados são inventados.
+
+    ## Regras gerais
+
+    - **Autenticação:** toda rota sob `/v1` exige o cabeçalho `X-Api-Key`. Sem ele, ou com valor errado, a resposta é `401`.
+      A chave é o valor de `MOCK_API_KEY` no `.env` do kit.
+    - **Sem CORS:** a API não envia nenhum cabeçalho `Access-Control-*` e recusa `OPTIONS`. Chamadas feitas direto do
+      navegador falham; a API deve ser chamada pelo servidor do seu app.
+    - **Erros:** sempre no mesmo formato, `{ "code", "message", "correlationId" }`, com `fields` nos erros de validação.
+      `code` é estável; `message` é texto em pt-BR.
+    - **Correlation id:** envie `X-Correlation-Id` e ele volta no cabeçalho e no corpo de erro. Sem ele, a API gera um.
+    - **Limites:** a API pode responder `429` com `Retry-After` (em segundos) quando um cliente passa de cerca de
+      10 requisições por segundo. A consulta de status aceita no máximo uma chamada por segundo por nota.
+    - **Instabilidade:** a API pode demorar e pode responder `500` de forma intermitente.
+    - **Valores monetários** são strings decimais com ponto (`"1234.50"`), nunca números.
+    - **Datas e horas** de emissão vêm em UTC, ISO 8601 (`"2026-11-05T14:30:00.000Z"`).
+    - **CNPJ** sem máscara: 14 caracteres, `^[0-9A-Z]{12}[0-9]{2}$`.
+servers:
+  - url: http://mock-api:4010
+    description: Dentro da rede do compose
+  - url: http://127.0.0.1:4010
+    description: Na sua máquina, com o perfil `dev` do compose
+security:
+  - apiKey: []
+tags:
+  - name: Notas
+  - name: Destinatários
+  - name: Faturamento
+  - name: Infra
+paths:
+  /health:
+    get:
+      tags: [Infra]
+      summary: Verificação de saúde
+      description: Não exige `X-Api-Key`. Usada pelo healthcheck do compose.
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: API no ar.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+
+  /v1/notas:
+    get:
+      tags: [Notas]
+      summary: Lista notas com filtros e paginação
+      description: |
+        Ordenação fixa: emissão mais recente primeiro. Todos os filtros são opcionais e se combinam (E lógico).
+      operationId: listarNotas
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/NotaStatus'
+        - name: emitidaDe
+          in: query
+          description: |
+            Primeiro dia (inclusive) da emissão, `AAAA-MM-DD`, em `America/Sao_Paulo`.
+          schema:
+            type: string
+            format: date
+          example: '2026-11-01'
+        - name: emitidaAte
+          in: query
+          description: |
+            Último dia (inclusive) da emissão, `AAAA-MM-DD`, em `America/Sao_Paulo`. Igual ou posterior a `emitidaDe`.
+          schema:
+            type: string
+            format: date
+          example: '2026-11-30'
+        - name: destinatario
+          in: query
+          description: |
+            CNPJ do destinatário (numérico ou alfanumérico, com ou sem máscara, inteiro ou um trecho) ou trecho da razão
+            social (sem diferenciar maiúsculas nem acentos).
+          schema:
+            type: string
+            maxLength: 120
+          examples:
+            cnpjComMascara:
+              value: 12.ABC.345/01DE-35
+            razaoSocial:
+              value: aurora
+        - name: page
+          in: query
+          description: Página, a partir de 1.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          description: Itens por página.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: Uma página de notas.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginaNotas'
+        '400':
+          $ref: '#/components/responses/ParametroInvalido'
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+        '500':
+          $ref: '#/components/responses/ErroInterno'
+
+  /v1/notas/{id}:
+    get:
+      tags: [Notas]
+      summary: Detalhe de uma nota
+      operationId: obterNota
+      parameters:
+        - $ref: '#/components/parameters/NotaId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: A nota.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotaDetalhe'
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '404':
+          $ref: '#/components/responses/NotaNaoEncontrada'
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+        '500':
+          $ref: '#/components/responses/ErroInterno'
+
+  /v1/notas/{id}/status:
+    get:
+      tags: [Notas]
+      summary: Status atual de uma nota (para polling)
+      description: |
+        Status atual e intervalo sugerido até a próxima consulta (`pollAfterMs`). No máximo uma consulta por segundo
+        por nota; acima disso, `429` com `Retry-After`.
+
+        `PROCESSANDO` passa a `AUTORIZADA` ou `REJEITADA` alguns segundos depois. `CANCELAMENTO_PROCESSANDO` passa a
+        `CANCELADA` alguns segundos depois.
+      operationId: obterStatusNota
+      parameters:
+        - $ref: '#/components/parameters/NotaId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Status atual.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusNota'
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '404':
+          $ref: '#/components/responses/NotaNaoEncontrada'
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+
+  /v1/notas/{id}/cancelamento:
+    post:
+      tags: [Notas]
+      summary: Solicita o cancelamento de uma nota
+      description: |
+        Só notas `AUTORIZADA` podem ser canceladas. Aceito com `202` e processado de forma assíncrona:
+        `CANCELAMENTO_PROCESSANDO` e depois `CANCELADA`. O cabeçalho `Idempotency-Key` é obrigatório.
+      operationId: cancelarNota
+      parameters:
+        - $ref: '#/components/parameters/NotaId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Chave de idempotência, até 255 caracteres.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelamentoRequest'
+      responses:
+        '202':
+          description: Cancelamento aceito.
+          headers:
+            Idempotent-Replayed:
+              description: '`true` quando a resposta repete uma anterior com a mesma `Idempotency-Key`.'
+              schema:
+                type: string
+                const: 'true'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelamentoAceito'
+        '400':
+          description: '`Idempotency-Key` ausente ou inválida (`IDEMPOTENCY_KEY_AUSENTE`, `IDEMPOTENCY_KEY_INVALIDA`) ou corpo que não é JSON (`CORPO_INVALIDO`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '404':
+          $ref: '#/components/responses/NotaNaoEncontrada'
+        '409':
+          description: '`NOTA_JA_CANCELADA` ou `NOTA_NAO_CANCELAVEL`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                code: NOTA_JA_CANCELADA
+                message: A nota 1042 já está cancelada ou com cancelamento em processamento.
+                correlationId: 6f1c2a9e-8f0b-4a51-9d8e-2b7f3c4d5e6f
+        '422':
+          description: |
+            `JUSTIFICATIVA_INVALIDA`: a justificativa precisa ter de 15 a 255 caracteres (regra da NF-e).
+            `IDEMPOTENCY_KEY_REUTILIZADA`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroValidacao'
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+
+  /v1/destinatarios/schema:
+    get:
+      tags: [Destinatários]
+      summary: JSON Schema do formulário de novo destinatário
+      description: |
+        Devolve um JSON Schema (draft 2020-12) que descreve o formulário. Além das palavras-chave padrão, cada campo traz
+        dicas para quem renderiza o formulário:
+
+        | Palavra-chave | Significado |
+        |---|---|
+        | `x-label` | Rótulo do campo, em pt-BR |
+        | `x-order` | Ordem de exibição dentro do objeto (crescente) |
+        | `x-widget` | Componente sugerido: `text`, `email`, `select`, `cnpj`, `fieldset` |
+        | `x-placeholder` | Texto de exemplo |
+        | `x-mask` | Máscara: `0` = dígito, `S` = dígito ou letra maiúscula; o resto é literal |
+        | `x-validator` | Validação extra feita pelo servidor (`cnpj`) |
+        | `x-submitLabel` | Texto do botão de envio (na raiz) |
+
+        O servidor valida `POST /v1/destinatarios` contra este mesmo schema.
+      operationId: obterSchemaDestinatario
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: O JSON Schema.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Documento JSON Schema draft 2020-12.
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+
+  /v1/destinatarios:
+    post:
+      tags: [Destinatários]
+      summary: Cadastra um destinatário
+      description: |
+        O corpo segue o schema de `GET /v1/destinatarios/schema`. O CNPJ pode vir com ou sem máscara e volta sem máscara.
+      operationId: criarDestinatario
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NovoDestinatario'
+            example:
+              razaoSocial: Cooperativa Exemplo do Vale Ltda
+              cnpj: 12.ABC.345/01DE-35
+              email: fiscal@cooperativa.exemplo.com.br
+              uf: PR
+              endereco:
+                cep: 80010-000
+                logradouro: Rua das Hortênsias
+                numero: '45'
+                bairro: Centro
+                municipio: Curitiba
+      responses:
+        '201':
+          description: Destinatário criado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DestinatarioCriado'
+        '400':
+          description: Corpo que não é JSON (`CORPO_INVALIDO`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '409':
+          description: '`DESTINATARIO_JA_EXISTE`: já há um destinatário com este CNPJ.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroValidacao'
+        '422':
+          description: '`VALIDACAO`: um ou mais campos inválidos, um item por campo em `fields`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroValidacao'
+              example:
+                code: VALIDACAO
+                message: Há campos inválidos no destinatário.
+                correlationId: 0b6a1d2e-3f4c-4b5a-8d9e-1f2a3b4c5d6e
+                fields:
+                  - path: /cnpj
+                    message: CNPJ com dígito verificador inválido.
+                  - path: /endereco/cep
+                    message: Formato inválido.
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+
+  /v1/faturamento/mensal:
+    get:
+      tags: [Faturamento]
+      summary: Faturamento mês a mês de um ano
+      description: |
+        Soma das notas `AUTORIZADA` no momento da consulta, agrupadas pelo mês fiscal (`America/Sao_Paulo`). Notas
+        canceladas, em cancelamento, rejeitadas ou em processamento não entram. Sempre traz os 12 meses do ano, com
+        zero nos meses sem nota.
+      operationId: faturamentoMensal
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: ano
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 2000
+            maximum: 2100
+          example: 2026
+      responses:
+        '200':
+          description: Os 12 meses do ano.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaturamentoMensal'
+        '400':
+          $ref: '#/components/responses/ParametroInvalido'
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+        '500':
+          $ref: '#/components/responses/ErroInterno'
+
+  /v1/faturamento/clientes:
+    get:
+      tags: [Faturamento]
+      summary: Maiores clientes do mês
+      description: |
+        Destinatários com notas `AUTORIZADA` no mês fiscal (`America/Sao_Paulo`), do maior valor para o menor
+        (empate: razão social). Mês sem notas devolve lista vazia.
+      operationId: faturamentoClientes
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: mes
+          in: query
+          required: true
+          description: Mês fiscal, `AAAA-MM`.
+          schema:
+            type: string
+            pattern: '^\d{4}-(0[1-9]|1[0-2])$'
+          example: '2026-11'
+        - name: limite
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: O ranking do mês.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaturamentoClientes'
+        '400':
+          $ref: '#/components/responses/ParametroInvalido'
+        '401':
+          $ref: '#/components/responses/NaoAutorizado'
+        '429':
+          $ref: '#/components/responses/LimiteDeRequisicoes'
+        '500':
+          $ref: '#/components/responses/ErroInterno'
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+
+  parameters:
+    NotaId:
+      name: id
+      in: path
+      required: true
+      description: Identificador da nota.
+      schema:
+        type: string
+      example: nf-0001
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: Identificador para rastrear a requisição. Letras, dígitos, `_`, `.`, `:` e `-`, até 128 caracteres.
+      schema:
+        type: string
+        maxLength: 128
+
+  headers:
+    CorrelationId:
+      description: O `X-Correlation-Id` recebido, ou um gerado pela API.
+      schema:
+        type: string
+    RetryAfter:
+      description: Segundos a esperar antes de tentar de novo.
+      schema:
+        type: integer
+        minimum: 1
+
+  responses:
+    NaoAutorizado:
+      description: '`NAO_AUTORIZADO`: `X-Api-Key` ausente ou inválida.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            code: NAO_AUTORIZADO
+            message: Cabeçalho X-Api-Key ausente ou inválido.
+            correlationId: 2c9d7e1f-4a3b-4c5d-9e8f-7a6b5c4d3e2f
+    NotaNaoEncontrada:
+      description: '`NOTA_NAO_ENCONTRADA`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+    ParametroInvalido:
+      description: '`PARAMETRO_INVALIDO`: algum parâmetro de consulta é inválido; `fields[].path` traz o nome do parâmetro.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErroValidacao'
+          example:
+            code: PARAMETRO_INVALIDO
+            message: Parâmetros de consulta inválidos.
+            correlationId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+            fields:
+              - path: pageSize
+                message: Inteiro entre 1 e 50.
+    LimiteDeRequisicoes:
+      description: '`LIMITE_DE_REQUISICOES`, com `Retry-After`.'
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+    ErroInterno:
+      description: '`ERRO_INTERNO`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+
+  schemas:
+    Erro:
+      type: object
+      required: [code, message, correlationId]
+      properties:
+        code:
+          type: string
+          description: Código estável do erro, em maiúsculas.
+        message:
+          type: string
+          description: Descrição para pessoas, em pt-BR.
+        correlationId:
+          type: string
+
+    ErroValidacao:
+      allOf:
+        - $ref: '#/components/schemas/Erro'
+        - type: object
+          properties:
+            fields:
+              type: array
+              items:
+                type: object
+                required: [path, message]
+                properties:
+                  path:
+                    type: string
+                    description: JSON Pointer do campo no corpo (ex. `/endereco/cep`) ou nome do parâmetro de consulta.
+                  message:
+                    type: string
+
+    NotaStatus:
+      type: string
+      enum: [PROCESSANDO, AUTORIZADA, REJEITADA, CANCELAMENTO_PROCESSANDO, CANCELADA]
+
+    Decimal:
+      type: string
+      pattern: '^\d+\.\d{2}$'
+      description: Valor monetário em reais, string decimal com duas casas e ponto.
+      examples: ['1234.50']
+
+    Cnpj:
+      type: string
+      pattern: '^[0-9A-Z]{12}[0-9]{2}$'
+      description: CNPJ sem máscara, numérico ou alfanumérico.
+      examples: ['12ABC34501DE35', '11222333000181']
+
+    Endereco:
+      type: object
+      required: [logradouro, numero, complemento, bairro, municipio, uf, cep]
+      properties:
+        logradouro: { type: string }
+        numero: { type: string }
+        complemento: { type: [string, 'null'] }
+        bairro: { type: string }
+        municipio: { type: string }
+        uf: { type: string, minLength: 2, maxLength: 2 }
+        cep: { type: string, examples: ['80010-000'] }
+
+    Empresa:
+      type: object
+      required: [razaoSocial, cnpj, inscricaoEstadual, email, endereco]
+      properties:
+        razaoSocial: { type: string }
+        cnpj: { $ref: '#/components/schemas/Cnpj' }
+        inscricaoEstadual: { type: [string, 'null'] }
+        email: { type: string, format: email }
+        endereco: { $ref: '#/components/schemas/Endereco' }
+
+    Item:
+      type: object
+      required: [codigo, descricao, ncm, cfop, unidade, quantidade, valorUnitario, valorTotal]
+      properties:
+        codigo: { type: string }
+        descricao: { type: string }
+        ncm: { type: string, pattern: '^\d{8}$' }
+        cfop: { type: string, pattern: '^\d{4}$' }
+        unidade: { type: string }
+        quantidade: { type: integer, minimum: 1 }
+        valorUnitario: { $ref: '#/components/schemas/Decimal' }
+        valorTotal: { $ref: '#/components/schemas/Decimal' }
+
+    NotaResumo:
+      type: object
+      required: [id, numero, serie, chaveAcesso, emitidaEm, status, destinatario, valorTotal]
+      properties:
+        id: { type: string, examples: ['nf-0001'] }
+        numero: { type: integer }
+        serie: { type: integer }
+        chaveAcesso:
+          type: string
+          pattern: '^\d{44}$'
+          description: Chave de acesso da NF-e, 44 dígitos.
+        emitidaEm:
+          type: string
+          format: date-time
+          description: Instante da emissão em UTC.
+        status: { $ref: '#/components/schemas/NotaStatus' }
+        destinatario:
+          type: object
+          required: [razaoSocial, cnpj]
+          properties:
+            razaoSocial: { type: string }
+            cnpj: { $ref: '#/components/schemas/Cnpj' }
+        valorTotal: { $ref: '#/components/schemas/Decimal' }
+
+    NotaDetalhe:
+      allOf:
+        - $ref: '#/components/schemas/NotaResumo'
+        - type: object
+          required: [naturezaOperacao, emitente, destinatario, itens, observacao, cancelamento]
+          properties:
+            naturezaOperacao: { type: string }
+            emitente: { $ref: '#/components/schemas/Empresa' }
+            destinatario: { $ref: '#/components/schemas/Empresa' }
+            itens:
+              type: array
+              minItems: 1
+              items: { $ref: '#/components/schemas/Item' }
+            observacao:
+              type: [string, 'null']
+              description: Texto livre informado na emissão; pode ter quebras de linha.
+            cancelamento:
+              oneOf:
+                - type: 'null'
+                - type: object
+                  required: [justificativa, solicitadoEm]
+                  properties:
+                    justificativa: { type: string }
+                    solicitadoEm: { type: string, format: date-time }
+
+    PaginaNotas:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/NotaResumo' }
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1, maximum: 50 }
+        total:
+          type: integer
+          minimum: 0
+          description: Total de notas que atendem aos filtros (todas as páginas).
+
+    StatusNota:
+      type: object
+      required: [status, pollAfterMs]
+      properties:
+        status: { $ref: '#/components/schemas/NotaStatus' }
+        pollAfterMs:
+          type: integer
+          description: Intervalo sugerido, em milissegundos, até a próxima consulta.
+          examples: [2000]
+
+    CancelamentoRequest:
+      type: object
+      required: [justificativa]
+      properties:
+        justificativa:
+          type: string
+          minLength: 15
+          maxLength: 255
+          description: Motivo do cancelamento, de 15 a 255 caracteres (contados sem os espaços das pontas).
+
+    CancelamentoAceito:
+      type: object
+      required: [id, status, solicitadoEm]
+      properties:
+        id: { type: string }
+        status:
+          type: string
+          const: CANCELAMENTO_PROCESSANDO
+        solicitadoEm: { type: string, format: date-time }
+
+    NovoDestinatario:
+      type: object
+      description: Resumo do schema servido em `GET /v1/destinatarios/schema`, que é a referência.
+      required: [razaoSocial, cnpj, email, uf, endereco]
+      additionalProperties: false
+      properties:
+        razaoSocial: { type: string, minLength: 3, maxLength: 120 }
+        cnpj:
+          type: string
+          pattern: '^[0-9A-Z]{2}\.?[0-9A-Z]{3}\.?[0-9A-Z]{3}/?[0-9A-Z]{4}-?[0-9]{2}$'
+        inscricaoEstadual: { type: string, pattern: '^([0-9]{2,14}|ISENTO)$' }
+        email: { type: string, format: email, maxLength: 120 }
+        uf: { type: string, minLength: 2, maxLength: 2 }
+        endereco:
+          type: object
+          additionalProperties: false
+          required: [cep, logradouro, numero, bairro, municipio]
+          properties:
+            cep: { type: string, pattern: '^[0-9]{5}-?[0-9]{3}$' }
+            logradouro: { type: string, minLength: 3, maxLength: 120 }
+            numero: { type: string, minLength: 1, maxLength: 10 }
+            complemento: { type: string, maxLength: 60 }
+            bairro: { type: string, minLength: 2, maxLength: 60 }
+            municipio: { type: string, minLength: 2, maxLength: 60 }
+
+    DestinatarioCriado:
+      type: object
+      description: Os campos enviados, com o CNPJ sem máscara, mais `id` e `criadoEm`.
+      required: [id, razaoSocial, cnpj, email, uf, endereco, criadoEm]
+      properties:
+        id: { type: string, examples: ['dest-0001'] }
+        razaoSocial: { type: string }
+        cnpj: { $ref: '#/components/schemas/Cnpj' }
+        inscricaoEstadual: { type: string }
+        email: { type: string, format: email }
+        uf: { type: string }
+        endereco: { $ref: '#/components/schemas/NovoDestinatario/properties/endereco' }
+        criadoEm: { type: string, format: date-time }
+
+    FaturamentoMensal:
+      type: object
+      required: [ano, meses]
+      properties:
+        ano: { type: integer }
+        meses:
+          type: array
+          minItems: 12
+          maxItems: 12
+          items:
+            type: object
+            required: [mes, quantidadeNotas, valorTotal]
+            properties:
+              mes:
+                type: string
+                description: Mês fiscal, `AAAA-MM`.
+                examples: ['2026-11']
+              quantidadeNotas: { type: integer, minimum: 0 }
+              valorTotal: { $ref: '#/components/schemas/Decimal' }
+
+    FaturamentoClientes:
+      type: object
+      required: [mes, clientes]
+      properties:
+        mes: { type: string, examples: ['2026-11'] }
+        clientes:
+          type: array
+          items:
+            type: object
+            required: [cnpj, razaoSocial, quantidadeNotas, valorTotal, comentarioContador]
+            properties:
+              cnpj: { $ref: '#/components/schemas/Cnpj' }
+              razaoSocial: { type: string }
+              quantidadeNotas: { type: integer, minimum: 1 }
+              valorTotal: { $ref: '#/components/schemas/Decimal' }
+              comentarioContador:
+                type: [string, 'null']
+                description: Anotação do escritório de contabilidade sobre o cliente, em HTML.
+                examples: ['<p>Cliente com <strong>pagamentos em dia</strong>.</p>']

@@ -1,0 +1,69 @@
+# Kit do candidato.
+#
+#   cp .env.example .env
+#   docker compose up -d                 # API só na rede interna (como na avaliação)
+#   docker compose --profile dev up -d   # também publica a API em http://127.0.0.1:4010
+#
+# Na avaliação, a API roda sem porta publicada: só o seu app (BFF), na mesma rede, alcança.
+name: teste-frontend
+
+services:
+  mock-api:
+    image: ghcr.io/joaoveeiga/teste-frontend-api:1.0.0
+    environment:
+      API_KEY: ${MOCK_API_KEY:?defina MOCK_API_KEY no .env (copie de .env.example)}
+    networks:
+      - interna
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  # Perfil dev: publica a API em 127.0.0.1:4010 para quem roda o Next fora do Docker.
+  # É um repasse TCP para a mesma instância da API (mesmo estado), não uma segunda API.
+  mock-api-dev-port:
+    profiles: [dev]
+    image: alpine/socat:1.8.1.1
+    command: ["TCP-LISTEN:4010,fork,reuseaddr", "TCP:mock-api:4010"]
+    depends_on:
+      mock-api:
+        condition: service_healthy
+    networks:
+      - interna
+      - publica
+    ports:
+      - "127.0.0.1:4010:4010"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  # Seu app (Next.js + BFF). Preencha e descomente.
+  # web:
+  #   build: ./web
+  #   environment:
+  #     # Lidas pelo servidor do Next (BFF). A chave da API não pode chegar ao navegador.
+  #     MOCK_API_URL: http://mock-api:4010
+  #     MOCK_API_KEY: ${MOCK_API_KEY}
+  #   ports:
+  #     - "127.0.0.1:${WEB_PORT:-3000}:3000"
+  #   networks:
+  #     - interna
+  #     - publica
+  #   depends_on:
+  #     mock-api:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "..."]
+
+networks:
+  # Sem saída e sem porta publicada: a API só é alcançável por serviços nesta rede.
+  interna:
+    internal: true
+  publica: {}
