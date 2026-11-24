@@ -64,3 +64,56 @@ body {
   background: var(--surface);
   color: var(--muted);
 }
+
+.faturamento__filtros {
+  display: flex;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+
+.faturamento__resumo {
+  display: flex;
+  gap: 32px;
+  margin: 0 0 16px;
+}
+
+.faturamento__resumo dd {
+  margin: 4px 0 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.mes {
+  display: grid;
+  grid-template-columns: 10rem 1fr 9rem 6rem;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.mes--selecionado {
+  outline: 2px solid var(--accent);
+}
+
+.mes__barra {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.cliente__linha {
+  display: grid;
+  grid-template-columns: 1fr 6rem 9rem 12rem;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.cliente__comentario {
+  padding: 8px 12px;
+  background: var(--surface);
+  color: var(--muted);
+}
